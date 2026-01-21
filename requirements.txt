@@ -1,0 +1,6 @@
+MetaTrader5==5.0.45
+numpy<2
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+pytz==2024.1
+
