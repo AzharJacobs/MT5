@@ -1,3 +1,7 @@
+import os
+import socket
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
 import psycopg2
 from psycopg2.extras import execute_values
 from datetime import datetime
@@ -6,16 +10,91 @@ import json
 
 class Database:
     def __init__(self, connection_string: str):
-        self.connection_string = connection_string
+        if not connection_string or not connection_string.strip():
+            raise ValueError("DATABASE_URL is empty. Please set it in your .env file.")
+        self.connection_string = connection_string.strip()
         self.conn = None
         self.connect()
 
     def connect(self):
         try:
-            self.conn = psycopg2.connect(self.connection_string)
+            conn_str = self._prepare_connection_string(self.connection_string)
+            # Keep timeouts explicit so a bad network fails fast instead of hanging.
+            self.conn = psycopg2.connect(conn_str, connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "10")))
             self.conn.autocommit = False
+        except psycopg2.OperationalError as e:
+            error_msg = str(e)
+            if "could not translate host name" in error_msg.lower():
+                raise Exception(f"Failed to resolve database hostname. Check your DATABASE_URL. Error: {e}")
+            elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                raise Exception(f"Connection timeout. Try setting DB_FORCE_IPV4=1 in your .env file. Error: {e}")
+            elif "password authentication failed" in error_msg.lower():
+                raise Exception(f"Authentication failed. Check your database credentials in DATABASE_URL. Error: {e}")
+            elif "SSL" in error_msg or "sslmode" in error_msg.lower():
+                raise Exception(f"SSL connection error. Supabase requires SSL. Ensure your DATABASE_URL includes '?sslmode=require'. Error: {e}")
+            else:
+                raise Exception(f"Failed to connect to database: {e}")
         except Exception as e:
             raise Exception(f"Failed to connect to database: {e}")
+
+    def _prepare_connection_string(self, connection_string: str) -> str:
+        """
+        Prepares the connection string for psycopg2, ensuring SSL is enabled for Supabase
+        and optionally forcing IPv4 if needed.
+        """
+        # Ensure SSL is required for Supabase (if not already specified)
+        parsed = urlparse(connection_string)
+        query_params = parse_qs(parsed.query)
+        
+        # If sslmode is not set, add it (Supabase requires SSL)
+        if 'sslmode' not in query_params:
+            query_params['sslmode'] = ['require']
+        
+        # Rebuild query string
+        new_query = urlencode(query_params, doseq=True)
+        
+        # Rebuild URL with SSL parameter
+        conn_with_ssl = urlunparse(parsed._replace(query=new_query))
+        
+        # Optionally force IPv4
+        return self._maybe_force_ipv4(conn_with_ssl)
+
+    def _maybe_force_ipv4(self, connection_string: str) -> str:
+        """
+        Some networks have broken IPv6 or block outbound 5432; Supabase hosts often resolve to IPv6 first.
+        If DB_FORCE_IPV4=1, resolve the hostname to an IPv4 address and rewrite the connection string
+        to use that address (keeps SSL params, query parameters, and credentials intact).
+        """
+        if os.getenv("DB_FORCE_IPV4", "").lower() not in {"1", "true", "yes"}:
+            return connection_string
+
+        try:
+            parsed = urlparse(connection_string)
+            hostname = parsed.hostname
+            if not hostname:
+                return connection_string
+
+            # Resolve IPv4 only
+            infos = socket.getaddrinfo(hostname, parsed.port or 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
+            if not infos:
+                return connection_string
+            ipv4 = infos[0][4][0]
+
+            # Rebuild netloc, preserving username/password/port
+            userinfo = ""
+            if parsed.username:
+                userinfo += parsed.username
+                if parsed.password:
+                    userinfo += f":{parsed.password}"
+                userinfo += "@"
+            port = f":{parsed.port}" if parsed.port else ""
+            new_netloc = f"{userinfo}{ipv4}{port}"
+
+            # Preserve all parts including query parameters (SSL mode, etc.)
+            return urlunparse(parsed._replace(netloc=new_netloc))
+        except Exception:
+            # If anything goes wrong, fall back to the original string.
+            return connection_string
 
     def reconnect(self):
         try:

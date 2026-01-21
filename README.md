@@ -280,6 +280,9 @@ Monitor the `data_collection_logs` table for:
 - Verify DATABASE_URL is correct
 - Check database permissions
 - Ensure tables were created (migration ran)
+- If you see a timeout to an IPv6 address (e.g. `2600:...`) on port 5432, your network likely blocks 5432 or has broken IPv6 routing.
+  - Try forcing IPv4: set `DB_FORCE_IPV4=1`
+  - You can also fail faster by setting `DB_CONNECT_TIMEOUT=10` (seconds)
 
 ### Gaps in Data
 - Normal during market closures (weekends, holidays)
