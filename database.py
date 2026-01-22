@@ -31,7 +31,7 @@ class Database:
             elif "password authentication failed" in error_msg.lower():
                 raise Exception(f"Authentication failed. Check your database credentials in DATABASE_URL. Error: {e}")
             elif "SSL" in error_msg or "sslmode" in error_msg.lower():
-                raise Exception(f"SSL connection error. Supabase requires SSL. Ensure your DATABASE_URL includes '?sslmode=require'. Error: {e}")
+                raise Exception(f"SSL connection error. Ensure your DATABASE_URL includes '?sslmode=require' if SSL is required. Error: {e}")
             else:
                 raise Exception(f"Failed to connect to database: {e}")
         except Exception as e:
@@ -39,29 +39,17 @@ class Database:
 
     def _prepare_connection_string(self, connection_string: str) -> str:
         """
-        Prepares the connection string for psycopg2, ensuring SSL is enabled for Supabase
-        and optionally forcing IPv4 if needed.
+        Prepares the connection string for psycopg2, optionally forcing IPv4 if needed.
+        SSL mode is preserved from the connection string if specified.
         """
-        # Ensure SSL is required for Supabase (if not already specified)
         parsed = urlparse(connection_string)
-        query_params = parse_qs(parsed.query)
-        
-        # If sslmode is not set, add it (Supabase requires SSL)
-        if 'sslmode' not in query_params:
-            query_params['sslmode'] = ['require']
-        
-        # Rebuild query string
-        new_query = urlencode(query_params, doseq=True)
-        
-        # Rebuild URL with SSL parameter
-        conn_with_ssl = urlunparse(parsed._replace(query=new_query))
         
         # Optionally force IPv4
-        return self._maybe_force_ipv4(conn_with_ssl)
+        return self._maybe_force_ipv4(connection_string)
 
     def _maybe_force_ipv4(self, connection_string: str) -> str:
         """
-        Some networks have broken IPv6 or block outbound 5432; Supabase hosts often resolve to IPv6 first.
+        Some networks have broken IPv6 or block outbound 5432.
         If DB_FORCE_IPV4=1, resolve the hostname to an IPv4 address and rewrite the connection string
         to use that address (keeps SSL params, query parameters, and credentials intact).
         """

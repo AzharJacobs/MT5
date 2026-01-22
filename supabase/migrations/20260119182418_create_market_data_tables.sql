@@ -30,11 +30,7 @@
     - Index on (symbol, timeframe) for instrument-specific queries
     - Index on data_collection_logs timestamp for log retrieval
 
-  3. Security
-    - Enable RLS on both tables
-    - Add policies for service role access only (this is a backend service)
-
-  4. Notes
+  3. Notes
     - Using numeric type for prices to avoid floating-point precision issues
     - Timestamps are stored in UTC with timezone awareness
     - Unique constraint ensures no duplicate candles
@@ -78,26 +74,6 @@ CREATE TABLE IF NOT EXISTS data_collection_logs (
 -- Create index for log queries
 CREATE INDEX IF NOT EXISTS logs_timestamp_idx ON data_collection_logs(timestamp);
 CREATE INDEX IF NOT EXISTS logs_level_idx ON data_collection_logs(level);
-
--- Enable Row Level Security
-ALTER TABLE candles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE data_collection_logs ENABLE ROW LEVEL SECURITY;
-
--- Create policies for service role access
--- These policies allow full access to service role (backend service)
-CREATE POLICY "Service role can manage candles"
-  ON candles
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
-
-CREATE POLICY "Service role can manage logs"
-  ON data_collection_logs
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
 
 -- Create function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

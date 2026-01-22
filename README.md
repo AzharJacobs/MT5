@@ -77,7 +77,7 @@ Tracks service operations:
 
 ### Prerequisites
 1. **MetaTrader 5** terminal installed and configured
-2. **PostgreSQL** database (Supabase recommended)
+2. **PostgreSQL** database
 3. **Python 3.8+** installed
 
 ### Installation
@@ -101,7 +101,7 @@ Tracks service operations:
    MT5_PASSWORD=your_password
    MT5_SERVER=your_broker_server
 
-   # Database Connection (available in your Supabase project)
+   # Database Connection
    DATABASE_URL=postgresql://user:password@host:port/database
    ```
 
@@ -347,7 +347,7 @@ Extend `data_fetcher.py` to add:
 
 For issues related to:
 - **MT5 Python API**: [MetaQuotes Documentation](https://www.mql5.com/en/docs/python_metatrader5)
-- **Database**: Check Supabase documentation
+- **Database**: Check PostgreSQL documentation
 - **Service Logic**: Review logs in `data_collection_logs` table
 
 ## License
