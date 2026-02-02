@@ -1,104 +1,98 @@
-import os
-import socket
-from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
-
-import psycopg2
-from psycopg2.extras import execute_values
-from datetime import datetime
+import libsql_client
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import json
 
 class Database:
-    def __init__(self, connection_string: str):
-        if not connection_string or not connection_string.strip():
-            raise ValueError("DATABASE_URL is empty. Please set it in your .env file.")
-        self.connection_string = connection_string.strip()
-        self.conn = None
+    def __init__(self, database_url: str, auth_token: str):
+        if not database_url or not database_url.strip():
+            raise ValueError("TURSO_DATABASE_URL is empty. Please set it in your .env file.")
+        if not auth_token or not auth_token.strip():
+            raise ValueError("TURSO_AUTH_TOKEN is empty. Please set it in your .env file.")
+
+        self.database_url = database_url.strip()
+        self.auth_token = auth_token.strip()
+        self.client = None
         self.connect()
 
     def connect(self):
         try:
-            conn_str = self._prepare_connection_string(self.connection_string)
-            # Keep timeouts explicit so a bad network fails fast instead of hanging.
-            self.conn = psycopg2.connect(conn_str, connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "10")))
-            self.conn.autocommit = False
-        except psycopg2.OperationalError as e:
-            error_msg = str(e)
-            if "could not translate host name" in error_msg.lower():
-                raise Exception(f"Failed to resolve database hostname. Check your DATABASE_URL. Error: {e}")
-            elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                raise Exception(f"Connection timeout. Try setting DB_FORCE_IPV4=1 in your .env file. Error: {e}")
-            elif "password authentication failed" in error_msg.lower():
-                raise Exception(f"Authentication failed. Check your database credentials in DATABASE_URL. Error: {e}")
-            elif "SSL" in error_msg or "sslmode" in error_msg.lower():
-                raise Exception(f"SSL connection error. Ensure your DATABASE_URL includes '?sslmode=require' if SSL is required. Error: {e}")
-            else:
-                raise Exception(f"Failed to connect to database: {e}")
+            self.client = libsql_client.create_client(
+                url=self.database_url,
+                auth_token=self.auth_token
+            )
+            self._initialize_schema()
         except Exception as e:
-            raise Exception(f"Failed to connect to database: {e}")
+            raise Exception(f"Failed to connect to Turso database: {e}")
 
-    def _prepare_connection_string(self, connection_string: str) -> str:
-        """
-        Prepares the connection string for psycopg2, optionally forcing IPv4 if needed.
-        SSL mode is preserved from the connection string if specified.
-        """
-        parsed = urlparse(connection_string)
-        
-        # Optionally force IPv4
-        return self._maybe_force_ipv4(connection_string)
-
-    def _maybe_force_ipv4(self, connection_string: str) -> str:
-        """
-        Some networks have broken IPv6 or block outbound 5432.
-        If DB_FORCE_IPV4=1, resolve the hostname to an IPv4 address and rewrite the connection string
-        to use that address (keeps SSL params, query parameters, and credentials intact).
-        """
-        if os.getenv("DB_FORCE_IPV4", "").lower() not in {"1", "true", "yes"}:
-            return connection_string
-
+    def _initialize_schema(self):
         try:
-            parsed = urlparse(connection_string)
-            hostname = parsed.hostname
-            if not hostname:
-                return connection_string
+            self.client.execute("""
+                CREATE TABLE IF NOT EXISTS candles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-            # Resolve IPv4 only
-            infos = socket.getaddrinfo(hostname, parsed.port or 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
-            if not infos:
-                return connection_string
-            ipv4 = infos[0][4][0]
+            self.client.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS candles_symbol_timeframe_timestamp_idx
+                ON candles(symbol, timeframe, timestamp)
+            """)
 
-            # Rebuild netloc, preserving username/password/port
-            userinfo = ""
-            if parsed.username:
-                userinfo += parsed.username
-                if parsed.password:
-                    userinfo += f":{parsed.password}"
-                userinfo += "@"
-            port = f":{parsed.port}" if parsed.port else ""
-            new_netloc = f"{userinfo}{ipv4}{port}"
+            self.client.execute("""
+                CREATE INDEX IF NOT EXISTS candles_timestamp_idx ON candles(timestamp)
+            """)
 
-            # Preserve all parts including query parameters (SSL mode, etc.)
-            return urlunparse(parsed._replace(netloc=new_netloc))
-        except Exception:
-            # If anything goes wrong, fall back to the original string.
-            return connection_string
+            self.client.execute("""
+                CREATE INDEX IF NOT EXISTS candles_symbol_timeframe_idx ON candles(symbol, timeframe)
+            """)
+
+            self.client.execute("""
+                CREATE TABLE IF NOT EXISTS data_collection_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    level TEXT NOT NULL,
+                    symbol TEXT,
+                    timeframe TEXT,
+                    message TEXT NOT NULL,
+                    details TEXT
+                )
+            """)
+
+            self.client.execute("""
+                CREATE INDEX IF NOT EXISTS logs_timestamp_idx ON data_collection_logs(timestamp)
+            """)
+
+            self.client.execute("""
+                CREATE INDEX IF NOT EXISTS logs_level_idx ON data_collection_logs(level)
+            """)
+
+        except Exception as e:
+            raise Exception(f"Failed to initialize schema: {e}")
 
     def reconnect(self):
         try:
-            if self.conn:
-                self.conn.close()
+            if self.client:
+                self.client.close()
         except:
             pass
         self.connect()
 
     def is_connected(self) -> bool:
         try:
-            if self.conn is None:
+            if self.client is None:
                 return False
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                return True
+            self.client.execute("SELECT 1")
+            return True
         except:
             return False
 
@@ -106,139 +100,140 @@ class Database:
         if not candles:
             return 0
 
-        query = """
-            INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
-            VALUES %s
-            ON CONFLICT (symbol, timeframe, timestamp) DO NOTHING
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                values = [
-                    (
-                        candle['symbol'],
-                        candle['timeframe'],
-                        candle['timestamp'],
-                        candle['open'],
-                        candle['high'],
-                        candle['low'],
-                        candle['close'],
-                        candle['volume']
-                    )
-                    for candle in candles
-                ]
-                execute_values(cur, query, values)
-                self.conn.commit()
-                return len(candles)
+            inserted_count = 0
+            for candle in candles:
+                timestamp_str = candle['timestamp'].isoformat()
+
+                result = self.client.execute("""
+                    INSERT OR IGNORE INTO candles
+                    (symbol, timeframe, timestamp, open, high, low, close, volume, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, [
+                    candle['symbol'],
+                    candle['timeframe'],
+                    timestamp_str,
+                    candle['open'],
+                    candle['high'],
+                    candle['low'],
+                    candle['close'],
+                    candle['volume']
+                ])
+
+                if result.rows_affected > 0:
+                    inserted_count += 1
+
+            return inserted_count
         except Exception as e:
-            self.conn.rollback()
             raise Exception(f"Failed to insert candles: {e}")
 
     def get_last_candle_timestamp(self, symbol: str, timeframe: str) -> Optional[datetime]:
-        query = """
-            SELECT MAX(timestamp) as last_timestamp
-            FROM candles
-            WHERE symbol = %s AND timeframe = %s
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, (symbol, timeframe))
-                result = cur.fetchone()
-                return result[0] if result and result[0] else None
+            result = self.client.execute("""
+                SELECT MAX(timestamp) as last_timestamp
+                FROM candles
+                WHERE symbol = ? AND timeframe = ?
+            """, [symbol, timeframe])
+
+            if result.rows and result.rows[0]['last_timestamp']:
+                timestamp_str = result.rows[0]['last_timestamp']
+                return datetime.fromisoformat(timestamp_str)
+            return None
         except Exception as e:
             raise Exception(f"Failed to get last candle timestamp: {e}")
 
     def get_candle_count(self, symbol: str, timeframe: str) -> int:
-        query = """
-            SELECT COUNT(*) FROM candles
-            WHERE symbol = %s AND timeframe = %s
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, (symbol, timeframe))
-                result = cur.fetchone()
-                return result[0] if result else 0
+            result = self.client.execute("""
+                SELECT COUNT(*) as count FROM candles
+                WHERE symbol = ? AND timeframe = ?
+            """, [symbol, timeframe])
+
+            if result.rows:
+                return result.rows[0]['count']
+            return 0
         except Exception as e:
             raise Exception(f"Failed to get candle count: {e}")
 
     def get_candles_in_range(self, symbol: str, timeframe: str,
                             start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        query = """
-            SELECT timestamp, open, high, low, close, volume
-            FROM candles
-            WHERE symbol = %s AND timeframe = %s
-              AND timestamp >= %s AND timestamp < %s
-            ORDER BY timestamp ASC
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, (symbol, timeframe, start_time, end_time))
-                results = cur.fetchall()
-                return [
-                    {
-                        'timestamp': row[0],
-                        'open': float(row[1]),
-                        'high': float(row[2]),
-                        'low': float(row[3]),
-                        'close': float(row[4]),
-                        'volume': int(row[5])
-                    }
-                    for row in results
-                ]
+            start_str = start_time.isoformat()
+            end_str = end_time.isoformat()
+
+            result = self.client.execute("""
+                SELECT timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE symbol = ? AND timeframe = ?
+                  AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp ASC
+            """, [symbol, timeframe, start_str, end_str])
+
+            candles = []
+            for row in result.rows:
+                candles.append({
+                    'timestamp': datetime.fromisoformat(row['timestamp']),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': int(row['volume'])
+                })
+            return candles
         except Exception as e:
             raise Exception(f"Failed to get candles in range: {e}")
 
     def detect_gaps(self, symbol: str, timeframe: str,
                    start_time: datetime, end_time: datetime,
                    expected_interval_minutes: int) -> List[Tuple[datetime, datetime]]:
-        query = """
-            WITH candle_times AS (
-                SELECT timestamp,
-                       LAG(timestamp) OVER (ORDER BY timestamp) as prev_timestamp
-                FROM candles
-                WHERE symbol = %s AND timeframe = %s
-                  AND timestamp >= %s AND timestamp < %s
-                ORDER BY timestamp
-            )
-            SELECT prev_timestamp, timestamp
-            FROM candle_times
-            WHERE prev_timestamp IS NOT NULL
-              AND EXTRACT(EPOCH FROM (timestamp - prev_timestamp)) > %s * 60 * 1.5
-            ORDER BY prev_timestamp
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, (symbol, timeframe, start_time, end_time, expected_interval_minutes))
-                results = cur.fetchall()
-                return [(row[0], row[1]) for row in results]
+            start_str = start_time.isoformat()
+            end_str = end_time.isoformat()
+
+            result = self.client.execute("""
+                SELECT timestamp
+                FROM candles
+                WHERE symbol = ? AND timeframe = ?
+                  AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp
+            """, [symbol, timeframe, start_str, end_str])
+
+            if not result.rows or len(result.rows) < 2:
+                return []
+
+            gaps = []
+            prev_timestamp = None
+            expected_interval_seconds = expected_interval_minutes * 60 * 1.5
+
+            for row in result.rows:
+                current_timestamp = datetime.fromisoformat(row['timestamp'])
+
+                if prev_timestamp:
+                    time_diff = (current_timestamp - prev_timestamp).total_seconds()
+                    if time_diff > expected_interval_seconds:
+                        gaps.append((prev_timestamp, current_timestamp))
+
+                prev_timestamp = current_timestamp
+
+            return gaps
         except Exception as e:
             raise Exception(f"Failed to detect gaps: {e}")
 
     def log_event(self, level: str, message: str, symbol: Optional[str] = None,
                  timeframe: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
-        query = """
-            INSERT INTO data_collection_logs (level, symbol, timeframe, message, details)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-
         try:
-            with self.conn.cursor() as cur:
-                cur.execute(query, (
-                    level,
-                    symbol,
-                    timeframe,
-                    message,
-                    json.dumps(details) if details else None
-                ))
-                self.conn.commit()
+            details_json = json.dumps(details) if details else None
+
+            self.client.execute("""
+                INSERT INTO data_collection_logs (level, symbol, timeframe, message, details, timestamp)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, [level, symbol, timeframe, message, details_json])
         except Exception as e:
-            self.conn.rollback()
             raise Exception(f"Failed to log event: {e}")
 
     def close(self):
-        if self.conn:
-            self.conn.close()
+        if self.client:
+            try:
+                self.client.close()
+            except:
+                pass

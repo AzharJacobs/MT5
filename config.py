@@ -8,7 +8,8 @@ class Config:
     MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
     MT5_SERVER = os.getenv('MT5_SERVER', '')
 
-    DATABASE_URL = os.getenv('DATABASE_URL', '')
+    TURSO_DATABASE_URL = os.getenv('TURSO_DATABASE_URL', '')
+    TURSO_AUTH_TOKEN = os.getenv('TURSO_AUTH_TOKEN', '')
 
     SYMBOLS = ['US30', 'USTech']
 

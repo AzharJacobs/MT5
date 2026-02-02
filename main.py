@@ -27,8 +27,8 @@ class MarketDataCollector:
         try:
             print("Initializing MT5 Market Data Collector...")
 
-            self.db = Database(config.DATABASE_URL)
-            print("Database connected")
+            self.db = Database(config.TURSO_DATABASE_URL, config.TURSO_AUTH_TOKEN)
+            print("Turso database connected")
 
             self.logger = Logger('MT5Collector', self.db)
             self.logger.info("Service starting...")

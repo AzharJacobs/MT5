@@ -1,6 +1,6 @@
 # MT5 Market Data Collection Service
 
-A reliable, production-ready service for collecting OHLCV (Open, High, Low, Close, Volume) candle data from MetaTrader 5 (MT5) trading accounts and storing it in PostgreSQL.
+A reliable, production-ready service for collecting OHLCV (Open, High, Low, Close, Volume) candle data from MetaTrader 5 (MT5) trading accounts and storing it in Turso (libSQL database).
 
 ## Purpose
 
@@ -8,7 +8,7 @@ This service is designed **exclusively for data ingestion**. It:
 - Connects to your MT5 trading account
 - Fetches historical and live market data
 - Detects and fills data gaps
-- Stores clean, normalized data in PostgreSQL
+- Stores clean, normalized data in Turso
 - Provides a stable data source for separate ML/strategy applications
 
 **What this service does NOT do:**
@@ -34,7 +34,7 @@ This service is designed **exclusively for data ingestion**. It:
 - MT5 connection monitoring with configurable retry logic
 - Comprehensive error logging to both console and database
 - Safe resume from last collected candle after restart
-- Transaction-based inserts with rollback on failure
+- Idempotent INSERT OR IGNORE for duplicate prevention
 
 ## Architecture
 
@@ -43,7 +43,7 @@ main.py                 # Service orchestrator and main loop
 ├── config.py          # Configuration management
 ├── mt5_connector.py   # MT5 connection with reconnect logic
 ├── data_fetcher.py    # Historical and live data fetching
-├── database.py        # PostgreSQL storage with idempotent writes
+├── database.py        # Turso (libSQL) storage with idempotent writes
 └── logger.py          # Logging to console and database
 ```
 
@@ -55,14 +55,16 @@ Stores OHLCV market data:
 - `symbol`: Trading instrument (e.g., US30, USTech)
 - `timeframe`: Candle timeframe (e.g., M1, H1, D1)
 - `timestamp`: UTC timestamp of candle open
-- `open`, `high`, `low`, `close`: Price data (numeric)
-- `volume`: Tick volume (bigint)
+- `open`, `high`, `low`, `close`: Price data (real)
+- `volume`: Tick volume (integer)
 - `created_at`, `updated_at`: Record timestamps
 
 **Indexes:**
 - Unique composite index on (symbol, timeframe, timestamp)
 - Index on timestamp for time-range queries
 - Index on (symbol, timeframe) for instrument queries
+
+**Note:** Tables and indexes are automatically created when the service starts for the first time.
 
 ### `data_collection_logs` Table
 Tracks service operations:
@@ -77,7 +79,7 @@ Tracks service operations:
 
 ### Prerequisites
 1. **MetaTrader 5** terminal installed and configured
-2. **PostgreSQL** database
+2. **Turso** database account and database created
 3. **Python 3.8+** installed
 
 ### Installation
@@ -101,11 +103,33 @@ Tracks service operations:
    MT5_PASSWORD=your_password
    MT5_SERVER=your_broker_server
 
-   # Database Connection
-   DATABASE_URL=postgresql://user:password@host:port/database
+   # Turso Database Connection
+   TURSO_DATABASE_URL=libsql://your-database.turso.io
+   TURSO_AUTH_TOKEN=your_auth_token_here
    ```
 
-3. **Verify MT5 Terminal:**
+3. **Create a Turso database:**
+
+   If you don't have a Turso account, sign up at [turso.tech](https://turso.tech)
+
+   Create a new database:
+   ```bash
+   turso db create candle-data
+   ```
+
+   Get your database URL:
+   ```bash
+   turso db show candle-data --url
+   ```
+
+   Create an auth token:
+   ```bash
+   turso db tokens create candle-data
+   ```
+
+   Add these values to your `.env` file.
+
+4. **Verify MT5 Terminal:**
    - Ensure MT5 terminal is running
    - Login to your account manually at least once
    - Enable automated trading in MT5 settings
@@ -150,7 +174,7 @@ python main.py
 ### Expected Output
 ```
 Initializing MT5 Market Data Collector...
-Database connected
+Turso database connected
 Connected to MT5 account...
 
 ============================================================
@@ -277,12 +301,10 @@ Monitor the `data_collection_logs` table for:
 - Check MT5 market watch for symbol visibility
 
 ### Database Errors
-- Verify DATABASE_URL is correct
-- Check database permissions
-- Ensure tables were created (migration ran)
-- If you see a timeout to an IPv6 address (e.g. `2600:...`) on port 5432, your network likely blocks 5432 or has broken IPv6 routing.
-  - Try forcing IPv4: set `DB_FORCE_IPV4=1`
-  - You can also fail faster by setting `DB_CONNECT_TIMEOUT=10` (seconds)
+- Verify TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are correct
+- Check that your Turso database exists and is accessible
+- Tables are created automatically on first run
+- Ensure you have network connectivity to Turso servers
 
 ### Gaps in Data
 - Normal during market closures (weekends, holidays)
@@ -294,8 +316,8 @@ Monitor the `data_collection_logs` table for:
 - ⚠️ Never commit `.env` file to source control
 - Store credentials securely
 - Use read-only MT5 accounts if possible
-- Restrict database access to service IP only
-- Use SSL for database connections in production
+- Turso uses SSL/TLS encryption by default
+- Keep your TURSO_AUTH_TOKEN secret and rotate it periodically
 
 ## Performance
 
@@ -347,7 +369,8 @@ Extend `data_fetcher.py` to add:
 
 For issues related to:
 - **MT5 Python API**: [MetaQuotes Documentation](https://www.mql5.com/en/docs/python_metatrader5)
-- **Database**: Check PostgreSQL documentation
+- **Turso Database**: [Turso Documentation](https://docs.turso.tech)
+- **libSQL Python Client**: [libsql-client Documentation](https://github.com/libsql/libsql-client-py)
 - **Service Logic**: Review logs in `data_collection_logs` table
 
 ## License
