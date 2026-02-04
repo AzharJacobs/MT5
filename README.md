@@ -1,6 +1,6 @@
 # MT5 Market Data Collection Service
 
-A reliable, production-ready service for collecting OHLCV (Open, High, Low, Close, Volume) candle data from MetaTrader 5 (MT5) trading accounts and storing it in Turso (libSQL database).
+A reliable, production-ready service for collecting OHLCV (Open, High, Low, Close, Volume) candle data from MetaTrader 5 (MT5) trading accounts and storing it in a local MySQL database (e.g. MySQL Workbench / MySQL Server).
 
 ## Purpose
 
@@ -8,7 +8,7 @@ This service is designed **exclusively for data ingestion**. It:
 - Connects to your MT5 trading account
 - Fetches historical and live market data
 - Detects and fills data gaps
-- Stores clean, normalized data in Turso
+- Stores clean, normalized data in MySQL
 - Provides a stable data source for separate ML/strategy applications
 
 **What this service does NOT do:**
@@ -34,7 +34,7 @@ This service is designed **exclusively for data ingestion**. It:
 - MT5 connection monitoring with configurable retry logic
 - Comprehensive error logging to both console and database
 - Safe resume from last collected candle after restart
-- Idempotent INSERT OR IGNORE for duplicate prevention
+- Idempotent INSERT IGNORE for duplicate prevention
 
 ## Architecture
 
@@ -43,7 +43,7 @@ main.py                 # Service orchestrator and main loop
 ├── config.py          # Configuration management
 ├── mt5_connector.py   # MT5 connection with reconnect logic
 ├── data_fetcher.py    # Historical and live data fetching
-├── database.py        # Turso (libSQL) storage with idempotent writes
+├── database.py        # MySQL storage with idempotent writes
 └── logger.py          # Logging to console and database
 ```
 
@@ -79,7 +79,7 @@ Tracks service operations:
 
 ### Prerequisites
 1. **MetaTrader 5** terminal installed and configured
-2. **Turso** database account and database created
+2. **MySQL Server** (e.g. via MySQL Workbench) with a database `trading_app_1` (or as set in `.env`)
 3. **Python 3.8+** installed
 
 ### Installation
@@ -103,31 +103,20 @@ Tracks service operations:
    MT5_PASSWORD=your_password
    MT5_SERVER=your_broker_server
 
-   # Turso Database Connection
-   TURSO_DATABASE_URL=libsql://your-database.turso.io
-   TURSO_AUTH_TOKEN=your_auth_token_here
+   # MySQL Database Connection (local MySQL Server / MySQL Workbench)
+   MYSQL_HOST=localhost
+   MYSQL_PORT=3306
+   MYSQL_USER=root
+   MYSQL_PASSWORD=your_mysql_password_here
+   MYSQL_DATABASE=trading_app_1
    ```
 
-3. **Create a Turso database:**
+3. **Set up MySQL:**
 
-   If you don't have a Turso account, sign up at [turso.tech](https://turso.tech)
-
-   Create a new database:
-   ```bash
-   turso db create candle-data
-   ```
-
-   Get your database URL:
-   ```bash
-   turso db show candle-data --url
-   ```
-
-   Create an auth token:
-   ```bash
-   turso db tokens create candle-data
-   ```
-
-   Add these values to your `.env` file.
+   - Install MySQL Server (or use MySQL Workbench with a local server).
+   - Create a database named `trading_app_1` (or set `MYSQL_DATABASE` in `.env`).
+   - Ensure the user in `MYSQL_USER` has privileges on that database.
+   - Set `MYSQL_PASSWORD` in `.env` (use an environment variable; do not hardcode).
 
 4. **Verify MT5 Terminal:**
    - Ensure MT5 terminal is running
@@ -174,7 +163,7 @@ python main.py
 ### Expected Output
 ```
 Initializing MT5 Market Data Collector...
-Turso database connected
+MySQL database connected
 Connected to MT5 account...
 
 ============================================================
@@ -301,10 +290,10 @@ Monitor the `data_collection_logs` table for:
 - Check MT5 market watch for symbol visibility
 
 ### Database Errors
-- Verify TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are correct
-- Check that your Turso database exists and is accessible
+- Verify MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE in `.env`
+- Ensure MySQL Server is running and the database exists
 - Tables are created automatically on first run
-- Ensure you have network connectivity to Turso servers
+- Ensure the MySQL user has CREATE and INSERT privileges
 
 ### Gaps in Data
 - Normal during market closures (weekends, holidays)
@@ -316,8 +305,8 @@ Monitor the `data_collection_logs` table for:
 - ⚠️ Never commit `.env` file to source control
 - Store credentials securely
 - Use read-only MT5 accounts if possible
-- Turso uses SSL/TLS encryption by default
-- Keep your TURSO_AUTH_TOKEN secret and rotate it periodically
+- Keep MYSQL_PASSWORD in `.env` only; never hardcode or commit it
+- Use a dedicated MySQL user with minimal required privileges
 
 ## Performance
 
@@ -369,8 +358,8 @@ Extend `data_fetcher.py` to add:
 
 For issues related to:
 - **MT5 Python API**: [MetaQuotes Documentation](https://www.mql5.com/en/docs/python_metatrader5)
-- **Turso Database**: [Turso Documentation](https://docs.turso.tech)
-- **libSQL Python Client**: [libsql-client Documentation](https://github.com/libsql/libsql-client-py)
+- **MySQL**: [MySQL Documentation](https://dev.mysql.com/doc/)
+- **mysql-connector-python**: [MySQL Connector/Python](https://dev.mysql.com/doc/connector-python/en/)
 - **Service Logic**: Review logs in `data_collection_logs` table
 
 ## License

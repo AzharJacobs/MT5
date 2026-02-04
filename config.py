@@ -8,8 +8,11 @@ class Config:
     MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
     MT5_SERVER = os.getenv('MT5_SERVER', '')
 
-    TURSO_DATABASE_URL = os.getenv('TURSO_DATABASE_URL', '')
-    TURSO_AUTH_TOKEN = os.getenv('TURSO_AUTH_TOKEN', '')
+    MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
+    MYSQL_PORT = int(os.getenv('MYSQL_PORT', '3306'))
+    MYSQL_USER = os.getenv('MYSQL_USER', 'root')
+    MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', '')
+    MYSQL_DATABASE = os.getenv('MYSQL_DATABASE', 'trading_app_1')
 
     SYMBOLS = ['US30', 'USTech']
 
