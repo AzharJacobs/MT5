@@ -1,5 +1,4 @@
 import libsql_client
-import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import json
@@ -18,13 +17,8 @@ class Database:
 
     def connect(self):
         try:
-            # Ensure there's an event loop available for aiohttp/libsql-client
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-
-            self.client = libsql_client.create_client(
+            # Use synchronous client to avoid asyncio event loop issues
+            self.client = libsql_client.create_client_sync(
                 url=self.database_url,
                 auth_token=self.auth_token
             )
