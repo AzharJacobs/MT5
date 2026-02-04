@@ -56,6 +56,7 @@ class Database:
         self.password = (password or "").strip()
         self.database = database.strip()
         self._conn = None
+        self._uses_fk_candles_schema = False
         self.connect()
 
     def _create_index_if_missing(self, cur, table: str, index_name: str, columns: str) -> None:
@@ -206,9 +207,39 @@ class Database:
                 """)
                 self._create_index_if_missing(cur, "data_collection_logs", "logs_timestamp_idx", "(`timestamp`)")
                 self._create_index_if_missing(cur, "data_collection_logs", "logs_level_idx", "(level)")
+                # Detect whether the existing `candles` table uses FK schema (symbol_id/timeframe_id/candle_time).
+                self._uses_fk_candles_schema = (
+                    self._column_exists(cur, "candles", "symbol_id")
+                    and self._column_exists(cur, "candles", "timeframe_id")
+                    and self._column_exists(cur, "candles", "candle_time")
+                )
             self._conn.commit()
         except MySQLError as e:
             raise Exception(f"Failed to initialize schema: {e}") from e
+
+    def _ensure_symbol_id(self, cur, symbol: str) -> int:
+        cur.execute("INSERT IGNORE INTO symbols (`symbol`) VALUES (%s)", [symbol])
+        cur.execute("SELECT id FROM symbols WHERE `symbol` = %s LIMIT 1", [symbol])
+        row = cur.fetchone()
+        if not row:
+            raise Exception(f"Failed to resolve symbol id for {symbol}")
+        return int(row[0])
+
+    def _ensure_timeframe_id(self, cur, timeframe: str, minutes: int) -> int:
+        # Keep minutes updated if timeframe exists.
+        cur.execute(
+            """
+            INSERT INTO timeframes (`timeframe`, `minutes`)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE minutes = VALUES(minutes)
+            """,
+            [timeframe, int(minutes)],
+        )
+        cur.execute("SELECT id FROM timeframes WHERE `timeframe` = %s LIMIT 1", [timeframe])
+        row = cur.fetchone()
+        if not row:
+            raise Exception(f"Failed to resolve timeframe id for {timeframe}")
+        return int(row[0])
 
     def reconnect(self) -> None:
         try:
@@ -225,9 +256,13 @@ class Database:
                 return False
             if not self._conn.is_connected():
                 return False
+            # IMPORTANT: mysql-connector can raise "Unread result found" if we
+            # execute a SELECT and don't consume its result before the next query
+            # on the same connection. Always fetch.
             cur = self._conn.cursor()
             try:
                 cur.execute("SELECT 1")
+                cur.fetchone()
             finally:
                 try:
                     cur.close()
@@ -243,28 +278,69 @@ class Database:
 
         inserted_count = 0
         try:
-            with self._conn.cursor(dictionary=True) as cur:
+            with self._conn.cursor() as cur:
+                # Cache IDs per batch to reduce round-trips
+                symbol_id_cache: Dict[str, int] = {}
+                timeframe_id_cache: Dict[str, int] = {}
+
                 for candle in candles:
-                    timestamp_str = candle["timestamp"].isoformat()
-                    cur.execute(
-                        """
-                        INSERT IGNORE INTO candles
-                        (symbol, timeframe, `timestamp`, `open`, high, low, `close`, volume, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                        """,
-                        [
-                            candle["symbol"],
-                            candle["timeframe"],
-                            timestamp_str,
-                            candle["open"],
-                            candle["high"],
-                            candle["low"],
-                            candle["close"],
-                            candle["volume"],
-                        ],
-                    )
-                    if cur.rowcount > 0:
-                        inserted_count += 1
+                    symbol = candle["symbol"]
+                    timeframe = candle["timeframe"]
+                    timestamp_dt = candle["timestamp"]
+                    timestamp_str = timestamp_dt.isoformat()
+
+                    if self._uses_fk_candles_schema:
+                        if symbol not in symbol_id_cache:
+                            symbol_id_cache[symbol] = self._ensure_symbol_id(cur, symbol)
+                        if timeframe not in timeframe_id_cache:
+                            minutes = int(candle.get("timeframe_minutes") or 0)
+                            if minutes <= 0:
+                                raise Exception(f"Missing timeframe_minutes for {timeframe}")
+                            timeframe_id_cache[timeframe] = self._ensure_timeframe_id(cur, timeframe, minutes)
+
+                        candle_time = timestamp_dt.replace(tzinfo=None) if hasattr(timestamp_dt, "tzinfo") else timestamp_dt
+                        cur.execute(
+                            """
+                            INSERT IGNORE INTO candles
+                            (symbol_id, timeframe_id, candle_time, `open`, high, low, `close`, volume, created_at, updated_at, `timestamp`, symbol, timeframe)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, %s, %s, %s)
+                            """,
+                            [
+                                symbol_id_cache[symbol],
+                                timeframe_id_cache[timeframe],
+                                candle_time,
+                                candle["open"],
+                                candle["high"],
+                                candle["low"],
+                                candle["close"],
+                                candle["volume"],
+                                timestamp_str,
+                                symbol,
+                                timeframe,
+                            ],
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT IGNORE INTO candles
+                            (symbol, timeframe, `timestamp`, `open`, high, low, `close`, volume, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """,
+                            [
+                                symbol,
+                                timeframe,
+                                timestamp_str,
+                                candle["open"],
+                                candle["high"],
+                                candle["low"],
+                                candle["close"],
+                                candle["volume"],
+                            ],
+                        )
+
+                    # For INSERT IGNORE, rowcount is 1 for inserted, 0 for ignored.
+                    if cur.rowcount and cur.rowcount > 0:
+                        inserted_count += int(cur.rowcount)
             self._conn.commit()
             return inserted_count
         except MySQLError as e:

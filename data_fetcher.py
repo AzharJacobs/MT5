@@ -16,6 +16,15 @@ class DataFetcher:
         'H4': mt5.TIMEFRAME_H4,
         'D1': mt5.TIMEFRAME_D1,
     }
+    TIMEFRAME_MINUTES = {
+        'M1': 1,
+        'M5': 5,
+        'M15': 15,
+        'M30': 30,
+        'H1': 60,
+        'H4': 240,
+        'D1': 1440,
+    }
 
     def __init__(self, mt5_connector: MT5Connector, db: Database, logger: Logger):
         self.mt5 = mt5_connector
@@ -30,12 +39,20 @@ class DataFetcher:
     def _get_mt5_timeframe(self, timeframe: str):
         return self.TIMEFRAME_MAP.get(timeframe)
 
+    def _get_timeframe_minutes(self, timeframe: str) -> Optional[int]:
+        return self.TIMEFRAME_MINUTES.get(timeframe)
+
     def fetch_historical_data(self, symbol: str, timeframe: str,
                             start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         if not self.mt5.ensure_connection():
             self.logger.error(f"Cannot fetch data - MT5 not connected", symbol=symbol, timeframe=timeframe)
             return []
 
+        mt5_symbol = self.mt5.resolve_symbol(symbol)
+        if not mt5_symbol:
+            self.logger.error(f"Symbol {symbol} not available", symbol=symbol, timeframe=timeframe)
+            return []
+        # Ensure it's selected/visible in Market Watch
         if not self.mt5.get_symbol_info(symbol):
             self.logger.error(f"Symbol {symbol} not available", symbol=symbol, timeframe=timeframe)
             return []
@@ -55,18 +72,34 @@ class DataFetcher:
                 timeframe=timeframe
             )
 
-            rates = mt5.copy_rates_range(symbol, mt5_timeframe, start_utc, end_utc)
+            # Fetch in chunks to avoid MT5 "Invalid params" on large ranges (esp. M1/M5).
+            tf_minutes = self._get_timeframe_minutes(timeframe) or 1
+            max_bars_per_call = 50000
+            chunk_delta = timedelta(minutes=tf_minutes * max_bars_per_call)
 
-            if rates is None or len(rates) == 0:
-                error = mt5.last_error()
-                self.logger.warning(
-                    f"No data received for {symbol} {timeframe}: {error}",
-                    symbol=symbol,
-                    timeframe=timeframe
-                )
-                return []
+            all_candles: List[Dict[str, Any]] = []
+            chunk_start = start_utc
+            while chunk_start < end_utc:
+                chunk_end = min(end_utc, chunk_start + chunk_delta)
+                rates = mt5.copy_rates_range(mt5_symbol, mt5_timeframe, chunk_start, chunk_end)
 
-            candles = self._convert_rates_to_candles(rates, symbol, timeframe)
+                if rates is None or len(rates) == 0:
+                    error = mt5.last_error()
+                    # If the call fails due to params, tighten the chunk and retry.
+                    if "Invalid params" in str(error) and chunk_delta > timedelta(days=1):
+                        chunk_delta = max(timedelta(days=1), chunk_delta / 2)
+                        continue
+                    self.logger.warning(
+                        f"No data received for {symbol} {timeframe}: {error}",
+                        symbol=symbol,
+                        timeframe=timeframe
+                    )
+                else:
+                    all_candles.extend(self._convert_rates_to_candles(rates, symbol, timeframe))
+
+                chunk_start = chunk_end
+
+            candles = all_candles
             self.logger.info(
                 f"Fetched {len(candles)} candles for {symbol} {timeframe}",
                 symbol=symbol,
@@ -89,6 +122,11 @@ class DataFetcher:
             self.logger.error(f"Cannot fetch data - MT5 not connected", symbol=symbol, timeframe=timeframe)
             return []
 
+        mt5_symbol = self.mt5.resolve_symbol(symbol)
+        if not mt5_symbol:
+            self.logger.error(f"Symbol {symbol} not available", symbol=symbol, timeframe=timeframe)
+            return []
+        # Ensure it's selected/visible in Market Watch
         if not self.mt5.get_symbol_info(symbol):
             self.logger.error(f"Symbol {symbol} not available", symbol=symbol, timeframe=timeframe)
             return []
@@ -99,7 +137,7 @@ class DataFetcher:
             return []
 
         try:
-            rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
+            rates = mt5.copy_rates_from_pos(mt5_symbol, mt5_timeframe, 0, count)
 
             if rates is None or len(rates) == 0:
                 error = mt5.last_error()
@@ -123,11 +161,13 @@ class DataFetcher:
 
     def _convert_rates_to_candles(self, rates, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
         candles = []
+        tf_minutes = self._get_timeframe_minutes(timeframe) or 0
         for rate in rates:
             timestamp = datetime.fromtimestamp(rate['time'], tz=pytz.UTC)
             candle = {
                 'symbol': symbol,
                 'timeframe': timeframe,
+                'timeframe_minutes': tf_minutes,
                 'timestamp': timestamp,
                 'open': float(rate['open']),
                 'high': float(rate['high']),
